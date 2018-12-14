@@ -18,7 +18,6 @@
 
 use std::fmt;
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -127,7 +126,7 @@ impl Outbound {
                 }
             }
 
-            if self.server.pause.load(Ordering::Relaxed) {
+            if self.server.paused() {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }

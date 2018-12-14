@@ -17,12 +17,10 @@
 //! This module handles all the inbound SWIM messages.
 
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::atomic::Ordering;
 use std::thread;
+use std::time::Duration;
 
-use cpu_time::ThreadTime;
 use prometheus::{CounterVec, GaugeVec};
-use time::{Duration, SteadyTime};
 
 use super::AckSender;
 use member::Health;
@@ -41,12 +39,6 @@ lazy_static! {
         "hab_butterfly_swim_received_bytes",
         "SWIM message size received in bytes",
         &["type"]
-    )
-    .unwrap();
-    static ref CPU_TIME: GaugeVec = register_gauge_vec!(
-        "hab_butterfly_cpu_time_seconds",
-        "CPU time, organized by thread",
-        &["thread"]
     )
     .unwrap();
 }
@@ -71,12 +63,10 @@ impl Inbound {
     /// Run the thread. Listens for messages up to 1k in size, and then processes them accordingly.
     pub fn run(&self) {
         let mut recv_buffer: Vec<u8> = vec![0; 1024];
-        let mut next_time = SteadyTime::now();
-        let mut cpu_start = ThreadTime::now();
 
         loop {
-            if self.server.pause.load(Ordering::Relaxed) {
-                thread::sleep(::std::time::Duration::from_millis(100));
+            if self.server.paused() {
+                thread::sleep(Duration::from_millis(100));
                 continue;
             }
 
@@ -165,19 +155,6 @@ impl Inbound {
                         }
                     }
                 }
-            }
-
-            // JB TODO: this feels like a lot of boilerplate to measure CPU usage. maybe all of
-            // this needs to be abstracted into a metrics module
-            if SteadyTime::now() >= next_time {
-                let current_thread = thread::current();
-                let thread_name = current_thread.name().unwrap();
-                let cpu_duration = cpu_start.elapsed();
-                let cpu_time: f64 = (cpu_duration.as_secs() as f64)
-                    + (cpu_duration.subsec_nanos() as f64) / (1_000_000_000 as f64);
-                CPU_TIME.with_label_values(&[thread_name]).set(cpu_time);
-                next_time = SteadyTime::now() + Duration::seconds(1);
-                cpu_start = ThreadTime::now();
             }
         }
     }

@@ -16,11 +16,12 @@ doc = false
 [dependencies]
 actix = "*"
 actix-web = { version = "*", default-features = false, features = [ "rust-tls" ] }
-clippy = { version = "*", optional = true }
 ansi_term = "*"
 bitflags = "*"
 byteorder = "*"
 clap = { version = "*", features = [ "suggestions", "color", "unstable" ] }
+clippy = { version = "*", optional = true }
+cpu-time = "*"
 env_logger = "*"
 features = "*"
 futures = "*"

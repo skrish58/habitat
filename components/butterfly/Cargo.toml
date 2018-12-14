@@ -12,7 +12,6 @@ doc = false
 
 [dependencies]
 clippy = {version = "*", optional = true}
-cpu-time = "*"
 byteorder = "*"
 bytes = "*"
 env_logger = "*"

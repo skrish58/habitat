@@ -41,12 +41,11 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use num_cpus;
-
 use butterfly;
 use butterfly::member::Member;
 use butterfly::server::{timing::Timing, ServerProxy, Suitability};
 use butterfly::trace::Trace;
+use cpu_time::ProcessTime;
 use futures::prelude::*;
 use futures::sync::mpsc;
 use hcore::crypto::SymKey;
@@ -56,13 +55,14 @@ use hcore::os::signals::{self, SignalEvent};
 use hcore::package::{Identifiable, PackageIdent, PackageInstall};
 use hcore::service::ServiceGroup;
 use launcher_client::{LauncherCli, LAUNCHER_LOCK_CLEAN_ENV, LAUNCHER_PID_ENV};
+use num_cpus;
 #[cfg(target_family = "unix")]
 use proc_self;
 use prometheus::{Gauge, GaugeVec, HistogramVec};
 use protocol;
 use rustls::{internal::pemfile, NoClientAuth, ServerConfig};
 use serde_json;
-use time::{self, Duration as TimeDuration, Timespec};
+use time::{self, Duration as TimeDuration, SteadyTime, Timespec};
 use tokio::{executor, runtime};
 #[cfg(target_family = "windows")]
 use winapi::{
@@ -113,6 +113,12 @@ lazy_static! {
         "hab_sup_memory_allocations_bytes",
         "Memory allocation statistics",
         &["category"]
+    )
+    .unwrap();
+    static ref CPU_TIME: GaugeVec = register_gauge_vec!(
+        "hab_sup_cpu_time_seconds",
+        "CPU time, organized by thread",
+        &["thread"]
     )
     .unwrap();
 }
@@ -531,6 +537,8 @@ impl Manager {
     pub fn run(mut self, svc: Option<protocol::ctl::SvcLoad>) -> Result<()> {
         let main_hist = RUN_LOOP_DURATION.with_label_values(&["sup"]);
         let service_hist = RUN_LOOP_DURATION.with_label_values(&["service"]);
+        let mut next_cpu_measurement = SteadyTime::now();
+        let mut cpu_start = ProcessTime::now();
 
         let mut runtime = runtime::Builder::new()
             .name_prefix("tokio-")
@@ -759,6 +767,18 @@ impl Manager {
             if now < next_check {
                 let time_to_wait = next_check - now;
                 thread::sleep(time_to_wait.to_std().unwrap());
+            }
+
+            // Measure CPU time every second
+            if SteadyTime::now() >= next_cpu_measurement {
+                let current_thread = thread::current();
+                let thread_name = current_thread.name().unwrap();
+                let cpu_duration = cpu_start.elapsed();
+                let cpu_time: f64 = (cpu_duration.as_secs() as f64)
+                    + (cpu_duration.subsec_nanos() as f64) / (1_000_000_000 as f64);
+                CPU_TIME.with_label_values(&[thread_name]).set(cpu_time);
+                next_cpu_measurement = SteadyTime::now() + TimeDuration::seconds(1);
+                cpu_start = ProcessTime::now();
             }
 
             main_timer.observe_duration();

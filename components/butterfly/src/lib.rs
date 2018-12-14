@@ -45,11 +45,14 @@
 
 extern crate byteorder;
 extern crate bytes;
+extern crate cpu_time;
 extern crate habitat_core;
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
 extern crate log;
+#[macro_use]
+extern crate prometheus;
 extern crate prost;
 #[macro_use]
 extern crate prost_derive;

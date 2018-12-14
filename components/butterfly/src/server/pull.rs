@@ -16,16 +16,31 @@
 //!
 //! This module handles pulling all the pushed rumors from every member off a ZMQ socket.
 
-use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
+use prometheus::{CounterVec, GaugeVec};
 use zmq;
 
 use rumor::{RumorEnvelope, RumorKind};
 use server::Server;
 use trace::TraceKind;
 use ZMQ_CONTEXT;
+
+lazy_static! {
+    static ref GOSSIP_MESSAGES_RECEIVED: CounterVec = register_counter_vec!(
+        "hab_butterfly_gossip_messages_received_total",
+        "Total number of gossip messages received",
+        &["type"]
+    )
+    .unwrap();
+    static ref GOSSIP_BYTES_RECEIVED: GaugeVec = register_gauge_vec!(
+        "hab_butterfly_gossip_received_bytes",
+        "Gossip message size received in bytes",
+        &["type"]
+    )
+    .unwrap();
+}
 
 /// Takes a reference to the server itself
 pub struct Pull {
@@ -55,7 +70,7 @@ impl Pull {
             .bind(&format!("tcp://{}", self.server.gossip_addr()))
             .expect("Failure to bind the ZMQ Pull socket to the port");
         'recv: loop {
-            if self.server.pause.load(Ordering::Relaxed) {
+            if self.server.paused() {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -82,6 +97,12 @@ impl Pull {
                     continue 'recv;
                 }
             };
+            GOSSIP_MESSAGES_RECEIVED
+                .with_label_values(&[&proto.type_.to_string()])
+                .inc();
+            GOSSIP_BYTES_RECEIVED
+                .with_label_values(&[&proto.type_.to_string()])
+                .set(payload.len() as f64);
             if self.server.is_member_blocked(&proto.from_id) {
                 warn!(
                     "Not processing message from {} - it is blocked",

@@ -26,6 +26,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
+use prometheus::GaugeVec;
 use rand::{seq::SliceRandom, thread_rng};
 use serde::{
     de,
@@ -42,6 +43,15 @@ use rumor::{RumorKey, RumorPayload, RumorType};
 
 /// How many nodes do we target when we need to run PingReq.
 const PINGREQ_TARGETS: usize = 5;
+
+lazy_static! {
+    static ref PEER_HEALTH_COUNT: GaugeVec = register_gauge_vec!(
+        "hab_butterfly_peer_health_total",
+        "Number of butterfly peers",
+        &["health"]
+    )
+    .unwrap();
+}
 
 /// Wraps a `u64` to represent the "incarnation number" of a
 /// `Member`. Incarnation numbers can only ever be incremented.
@@ -609,7 +619,37 @@ impl MemberList {
             .insert(String::from(member_id), health);
 
         self.increment_update_counter();
+        self.calculate_peer_health_metrics();
         true
+    }
+
+    fn calculate_peer_health_metrics(&self) {
+        let health_map = self.health.read().expect("Health lock is poisoned");
+        let health_count = health_map.values().filter(|h| **h == Health::Alive).count();
+        PEER_HEALTH_COUNT
+            .with_label_values(&["alive"])
+            .set(health_count as f64);
+        let health_count = health_map
+            .values()
+            .filter(|h| **h == Health::Suspect)
+            .count();
+        PEER_HEALTH_COUNT
+            .with_label_values(&["suspect"])
+            .set(health_count as f64);
+        let health_count = health_map
+            .values()
+            .filter(|h| **h == Health::Confirmed)
+            .count();
+        PEER_HEALTH_COUNT
+            .with_label_values(&["confirmed"])
+            .set(health_count as f64);
+        let health_count = health_map
+            .values()
+            .filter(|h| **h == Health::Departed)
+            .count();
+        PEER_HEALTH_COUNT
+            .with_label_values(&["departed"])
+            .set(health_count as f64);
     }
 
     // TODO (CM): accept AsRef<MemberId> here (and implement that on

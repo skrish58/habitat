@@ -17,10 +17,10 @@
 //! This is the thread for distributing rumors to members. It distributes to `FANOUT` members, no
 //! more often than `Timing::GOSSIP_PERIOD_DEFAULT_MS`.
 
-use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::Duration;
 
+use prometheus::{CounterVec, GaugeVec};
 use time::SteadyTime;
 use zmq;
 
@@ -32,6 +32,21 @@ use trace::TraceKind;
 use ZMQ_CONTEXT;
 
 const FANOUT: usize = 5;
+
+lazy_static! {
+    static ref GOSSIP_MESSAGES_SENT: CounterVec = register_counter_vec!(
+        "hab_butterfly_gossip_messages_sent_total",
+        "Total number of gossip messages sent",
+        &["type"]
+    )
+    .unwrap();
+    static ref GOSSIP_BYTES_SENT: GaugeVec = register_gauge_vec!(
+        "hab_butterfly_gossip_sent_bytes",
+        "Gossip message size sent in bytes",
+        &["type"]
+    )
+    .unwrap();
+}
 
 /// The Push server
 #[derive(Debug)]
@@ -55,7 +70,7 @@ impl Push {
     /// exceed that time.
     pub fn run(&mut self) {
         'send: loop {
-            if self.server.pause.load(Ordering::Relaxed) {
+            if self.server.paused() {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
@@ -144,7 +159,7 @@ impl PushWorker {
     /// Send the list of rumors to a given member. This method creates an outbound socket and then
     /// closes the connection as soon as we are done sending rumors. ZeroMQ may choose to keep the
     /// connection and socket open for 1 second longer - so it is possible, but unlikely, that this
-    /// method can loose messages.
+    /// method can lose messages.
     fn send_rumors(&self, member: Member, rumors: Vec<RumorKey>) {
         let socket = (**ZMQ_CONTEXT)
             .as_mut()
@@ -323,7 +338,15 @@ impl PushWorker {
                 }
             };
             match socket.send(&payload, 0) {
-                Ok(()) => debug!("Sent rumor {:?} to {:?}", rumor_key, member),
+                Ok(()) => {
+                    GOSSIP_MESSAGES_SENT
+                        .with_label_values(&[&rumor_key.kind.to_string()])
+                        .inc();
+                    GOSSIP_BYTES_SENT
+                        .with_label_values(&[&rumor_key.kind.to_string()])
+                        .set(payload.len() as f64);
+                    debug!("Sent rumor {:?} to {:?}", rumor_key, member);
+                }
                 Err(e) => warn!(
                     "Could not send rumor to {:?} @ {:?}; ZMQ said: {:?}",
                     member.id, to_addr, e

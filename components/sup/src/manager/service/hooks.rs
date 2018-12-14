@@ -28,6 +28,7 @@ use std::result;
 
 use hcore::service::ServiceGroup;
 use hcore::{self, crypto};
+use prometheus::HistogramVec;
 use serde::{Serialize, Serializer};
 
 use super::{health, Pkg};
@@ -39,6 +40,15 @@ use util::exec;
 #[cfg(not(windows))]
 pub const HOOK_PERMISSIONS: u32 = 0o755;
 static LOGKEY: &'static str = "HK";
+
+lazy_static! {
+    static ref RUN_HOOK_DURATION: HistogramVec = register_histogram_vec!(
+        "hab_sup_run_hook_duration_seconds",
+        "The time it takes for a hook to run",
+        &["hook"]
+    )
+    .unwrap();
+}
 
 pub fn stdout_log_path<T>(service_group: &ServiceGroup) -> PathBuf
 where
@@ -197,6 +207,10 @@ pub trait Hook: fmt::Debug + Sized {
     where
         T: ToString,
     {
+        let label_values = vec![Self::file_name()];
+        let timer = RUN_HOOK_DURATION
+            .with_label_values(&label_values)
+            .start_timer();
         let mut child = match exec::run(self.path(), &pkg, svc_encrypted_password) {
             Ok(child) => child,
             Err(err) => {
@@ -208,10 +222,14 @@ pub trait Hook: fmt::Debug + Sized {
         let mut hook_output = HookOutput::new(self.stdout_log_path(), self.stderr_log_path());
         hook_output.stream_output::<Self>(service_group, &mut child);
         match child.wait() {
-            Ok(status) => self.handle_exit(service_group, &hook_output, &status),
+            Ok(status) => {
+                timer.observe_duration();
+                self.handle_exit(service_group, &hook_output, &status)
+            }
             Err(err) => {
                 outputln!(preamble service_group,
                     "Hook failed to run, {}, {}", Self::file_name(), err);
+                timer.observe_duration();
                 Self::ExitValue::default()
             }
         }

@@ -43,11 +43,14 @@ habitat-sup-protocol = { path = "../sup-protocol", default-features = false }
 #   "foo.[0]"
 #   See https://github.com/sunng87/handlebars-rust/commit/707f05442ef6f441a1cfc6b13ac180b78cb296db
 handlebars = { version = "= 0.28.3", default-features = false }
+jemallocator = "*"
+jemalloc-ctl = "*"
 lazy_static = "*"
 libc = "*"
 log = "*"
 notify = "*"
 num_cpus = "*"
+prometheus = "*"
 prost = "*"
 protobuf = { version = "1.5.1", features = ["bytes"] }
 rand = "*"
@@ -69,6 +72,9 @@ valico = "*"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 caps = "*"
+
+[target.'cfg(target_family = "unix")'.dependencies]
+proc_self = "*"
 
 [target.'cfg(windows)'.dependencies]
 ctrlc = "*"

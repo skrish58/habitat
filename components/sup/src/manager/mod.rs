@@ -56,11 +56,19 @@ use hcore::os::signals::{self, SignalEvent};
 use hcore::package::{Identifiable, PackageIdent, PackageInstall};
 use hcore::service::ServiceGroup;
 use launcher_client::{LauncherCli, LAUNCHER_LOCK_CLEAN_ENV, LAUNCHER_PID_ENV};
+#[cfg(target_family = "unix")]
+use proc_self;
+use prometheus::{Gauge, GaugeVec, HistogramVec};
 use protocol;
 use rustls::{internal::pemfile, NoClientAuth, ServerConfig};
 use serde_json;
 use time::{self, Duration as TimeDuration, Timespec};
 use tokio::{executor, runtime};
+#[cfg(target_family = "windows")]
+use winapi::{
+    shared::minwindef::PDWORD,
+    um::{processthreadsapi, winnt::HANDLE},
+};
 
 use self::peer_watcher::PeerWatcher;
 use self::self_updater::{SelfUpdater, SUP_PKG_IDENT};
@@ -88,6 +96,26 @@ const MEMBER_ID_FILE: &'static str = "MEMBER_ID";
 const PROC_LOCK_FILE: &'static str = "LOCK";
 
 static LOGKEY: &'static str = "MR";
+
+lazy_static! {
+    static ref RUN_LOOP_DURATION: HistogramVec = register_histogram_vec!(
+        "hab_sup_run_loop_duration_seconds",
+        "The time it takes for one tick of a run loop",
+        &["loop"]
+    )
+    .unwrap();
+    static ref FILE_DESCRIPTORS: Gauge = register_gauge!(
+        "hab_sup_open_file_descriptors_total",
+        "A count of the total number of open file descriptors. Unix only"
+    )
+    .unwrap();
+    static ref MEMORY_STATS: GaugeVec = register_gauge_vec!(
+        "hab_sup_memory_allocations_bytes",
+        "Memory allocation statistics",
+        &["category"]
+    )
+    .unwrap();
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServiceOperation {
@@ -501,6 +529,9 @@ impl Manager {
     }
 
     pub fn run(mut self, svc: Option<protocol::ctl::SvcLoad>) -> Result<()> {
+        let main_hist = RUN_LOOP_DURATION.with_label_values(&["sup"]);
+        let service_hist = RUN_LOOP_DURATION.with_label_values(&["service"]);
+
         let mut runtime = runtime::Builder::new()
             .name_prefix("tokio-")
             .core_threads(TokioThreadCount::configured_value().into())
@@ -617,6 +648,10 @@ impl Manager {
         }
 
         loop {
+            let main_timer = main_hist.start_timer();
+            FILE_DESCRIPTORS.set(get_fd_count());
+            track_memory_stats();
+
             if feat::is_enabled(feat::TestExit) {
                 if let Ok(exit_file_path) = env::var("HAB_FEAT_TEST_EXIT") {
                     if let Ok(mut exit_code_file) = File::open(&exit_file_path) {
@@ -711,9 +746,11 @@ impl Manager {
                 .expect("Services lock is poisoned!")
                 .values_mut()
             {
+                let service_timer = service_hist.start_timer();
                 if service.tick(&self.census_ring, &self.launcher) {
                     self.gossip_latest_service_rumor(&service);
                 }
+                service_timer.observe_duration();
             }
 
             // This is really only needed until everything is running
@@ -723,6 +760,8 @@ impl Manager {
                 let time_to_wait = next_check - now;
                 thread::sleep(time_to_wait.to_std().unwrap());
             }
+
+            main_timer.observe_duration();
         }
     }
 
@@ -1339,6 +1378,63 @@ where
             err
         ))),
     }
+}
+
+#[cfg(target_family = "windows")]
+fn get_fd_count() -> f64 {
+    let mut count: u32 = 0;
+
+    unsafe {
+        let handle = processthreadsapi::GetCurrentProcess();
+        match processthreadsapi::GetProcessHandleCount(handle, &mut count as PDWORD) {
+            true => count as f64,
+            false => {
+                error!("Error trying to get the number of open file descriptors.");
+                0 as f64
+            }
+        }
+    }
+}
+
+#[cfg(target_family = "unix")]
+fn get_fd_count() -> f64 {
+    let c = match proc_self::FdIter::new() {
+        Ok(f) => f.count(),
+        Err(e) => {
+            error!(
+                "Error trying to get the number of open file descriptors: {:?}",
+                e
+            );
+            0
+        }
+    };
+
+    c as f64
+}
+
+fn track_memory_stats() {
+    // We'd like to track some memory stats, but these stats are cached and only refreshed
+    // when the epoch is advanced. We manually advance it here to ensure our stats are
+    // fresh.
+    jemalloc_ctl::epoch().unwrap();
+    MEMORY_STATS
+        .with_label_values(&["active"])
+        .set(jemalloc_ctl::stats::active().unwrap() as f64);
+    MEMORY_STATS
+        .with_label_values(&["allocated"])
+        .set(jemalloc_ctl::stats::allocated().unwrap() as f64);
+    MEMORY_STATS
+        .with_label_values(&["mapped"])
+        .set(jemalloc_ctl::stats::mapped().unwrap() as f64);
+    MEMORY_STATS
+        .with_label_values(&["metadata"])
+        .set(jemalloc_ctl::stats::metadata().unwrap() as f64);
+    MEMORY_STATS
+        .with_label_values(&["resident"])
+        .set(jemalloc_ctl::stats::resident().unwrap() as f64);
+    MEMORY_STATS
+        .with_label_values(&["retained"])
+        .set(jemalloc_ctl::stats::retained().unwrap() as f64);
 }
 
 struct CtlAcceptor {

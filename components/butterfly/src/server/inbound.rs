@@ -20,7 +20,8 @@ use std::net::{SocketAddr, UdpSocket};
 use std::thread;
 use std::time::Duration;
 
-use prometheus::{CounterVec, GaugeVec};
+use habitat_core::util::ToI64;
+use prometheus::{IntCounterVec, IntGaugeVec};
 
 use super::AckSender;
 use member::Health;
@@ -29,16 +30,16 @@ use swim::{Ack, Ping, PingReq, Swim, SwimKind};
 use trace::TraceKind;
 
 lazy_static! {
-    static ref SWIM_MESSAGES_RECEIVED: CounterVec = register_counter_vec!(
+    static ref SWIM_MESSAGES_RECEIVED: IntCounterVec = register_int_counter_vec!(
         "hab_butterfly_swim_messages_received_total",
         "Total number of SWIM messages received",
-        &["type"]
+        &["type", "mode"]
     )
     .unwrap();
-    static ref SWIM_BYTES_RECEIVED: GaugeVec = register_gauge_vec!(
+    static ref SWIM_BYTES_RECEIVED: IntGaugeVec = register_int_gauge_vec!(
         "hab_butterfly_swim_received_bytes",
         "SWIM message size received in bytes",
-        &["type"]
+        &["type", "mode"]
     )
     .unwrap();
 }
@@ -78,9 +79,15 @@ impl Inbound {
                             // NOTE: In the future, we might want to block people who send us
                             // garbage all the time.
                             error!("Error unwrapping protocol message, {}", e);
+                            let label_values = &["unwrap_wire", "failure"];
+                            SWIM_BYTES_RECEIVED
+                                .with_label_values(label_values)
+                                .set(length.to_i64());
+                            SWIM_MESSAGES_RECEIVED.with_label_values(label_values).inc();
                             continue;
                         }
                     };
+
                     let bytes_received = swim_payload.len();
                     let msg = match Swim::decode(&swim_payload) {
                         Ok(msg) => msg,
@@ -88,15 +95,28 @@ impl Inbound {
                             // NOTE: In the future, we might want to block people who send us
                             // garbage all the time.
                             error!("Error decoding protocol message, {}", e);
+                            let label_values = &["undecodable", "failure"];
+                            SWIM_BYTES_RECEIVED
+                                .with_label_values(label_values)
+                                .set(bytes_received.to_i64());
+                            SWIM_MESSAGES_RECEIVED.with_label_values(label_values).inc();
                             continue;
                         }
                     };
+
+                    // Setting a label_values variable here throws errors about moving borrowed
+                    // content that I couldn't solve w/o clones. Leaving this for now. I'm sure
+                    // there's a better way.
+                    SWIM_BYTES_RECEIVED
+                        .with_label_values(&[msg.kind.as_str(), "success"])
+                        .set(bytes_received.to_i64());
+                    SWIM_MESSAGES_RECEIVED
+                        .with_label_values(&[msg.kind.as_str(), "success"])
+                        .inc();
+
                     trace!("SWIM Message: {:?}", msg);
                     match msg.kind {
                         SwimKind::Ping(ping) => {
-                            SWIM_BYTES_RECEIVED
-                                .with_label_values(&["ping"])
-                                .set(bytes_received as f64);
                             if self.server.is_member_blocked(&ping.from.id) {
                                 debug!(
                                     "Not processing message from {} - it is blocked",
@@ -107,9 +127,6 @@ impl Inbound {
                             self.process_ping(addr, ping);
                         }
                         SwimKind::Ack(ack) => {
-                            SWIM_BYTES_RECEIVED
-                                .with_label_values(&["ack"])
-                                .set(bytes_received as f64);
                             if self.server.is_member_blocked(&ack.from.id)
                                 && ack.forward_to.is_none()
                             {
@@ -122,9 +139,6 @@ impl Inbound {
                             self.process_ack(addr, ack);
                         }
                         SwimKind::PingReq(pingreq) => {
-                            SWIM_BYTES_RECEIVED
-                                .with_label_values(&["pingreq"])
-                                .set(bytes_received as f64);
                             if self.server.is_member_blocked(&pingreq.from.id) {
                                 debug!(
                                     "Not processing message from {} - it is blocked",
@@ -143,8 +157,6 @@ impl Inbound {
                     match e.raw_os_error() {
                         Some(35) | Some(11) | Some(10035) | Some(10060) => {
                             // This is the normal non-blocking result, or a timeout
-                            // TODO: I'm not clear why we specifically _want_ a silent failure in
-                            // these cases.
                         }
                         Some(_) => {
                             error!("UDP Receive error: {}", e);
@@ -161,7 +173,6 @@ impl Inbound {
 
     /// Process pingreq messages.
     fn process_pingreq(&self, addr: SocketAddr, mut msg: PingReq) {
-        SWIM_MESSAGES_RECEIVED.with_label_values(&["pingreq"]).inc();
         trace_it!(SWIM: &self.server, TraceKind::RecvPingReq, &msg.from.id, addr, &msg);
         msg.from.address = addr.ip().to_string();
         let target = match self
@@ -191,7 +202,6 @@ impl Inbound {
 
     /// Process ack messages; forwards to the outbound thread.
     fn process_ack(&self, addr: SocketAddr, mut msg: Ack) {
-        SWIM_MESSAGES_RECEIVED.with_label_values(&["ack"]).inc();
         trace_it!(SWIM: &self.server, TraceKind::RecvAck, &msg.from.id, addr, &msg);
         trace!("Ack from {}@{}", msg.from.id, addr);
         if msg.forward_to.is_some() {
@@ -238,7 +248,6 @@ impl Inbound {
 
     /// Process ping messages.
     fn process_ping(&self, addr: SocketAddr, mut msg: Ping) {
-        SWIM_MESSAGES_RECEIVED.with_label_values(&["ping"]).inc();
         trace_it!(SWIM: &self.server, TraceKind::RecvPing, &msg.from.id, addr, &msg);
         outbound::ack(&self.server, &self.socket, &msg.from, addr, msg.forward_to);
         // Populate the member for this sender with its remote address

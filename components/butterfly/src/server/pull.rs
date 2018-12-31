@@ -19,7 +19,8 @@
 use std::thread;
 use std::time::Duration;
 
-use prometheus::{CounterVec, GaugeVec};
+use habitat_core::util::ToI64;
+use prometheus::{IntCounterVec, IntGaugeVec};
 use zmq;
 
 use rumor::{RumorEnvelope, RumorKind};
@@ -28,16 +29,16 @@ use trace::TraceKind;
 use ZMQ_CONTEXT;
 
 lazy_static! {
-    static ref GOSSIP_MESSAGES_RECEIVED: CounterVec = register_counter_vec!(
+    static ref GOSSIP_MESSAGES_RECEIVED: IntCounterVec = register_int_counter_vec!(
         "hab_butterfly_gossip_messages_received_total",
         "Total number of gossip messages received",
-        &["type"]
+        &["type", "mode", "blocked"]
     )
     .unwrap();
-    static ref GOSSIP_BYTES_RECEIVED: GaugeVec = register_gauge_vec!(
+    static ref GOSSIP_BYTES_RECEIVED: IntGaugeVec = register_int_gauge_vec!(
         "hab_butterfly_gossip_received_bytes",
         "Gossip message size received in bytes",
-        &["type"]
+        &["type", "mode", "blocked"]
     )
     .unwrap();
 }
@@ -74,6 +75,7 @@ impl Pull {
                 thread::sleep(Duration::from_millis(100));
                 continue;
             }
+
             let msg = match socket.recv_msg(0) {
                 Ok(msg) => msg,
                 Err(e) => {
@@ -81,35 +83,58 @@ impl Pull {
                     continue 'recv;
                 }
             };
+
             let payload = match self.server.unwrap_wire(&msg) {
                 Ok(payload) => payload,
                 Err(e) => {
                     // NOTE: In the future, we might want to block people who send us
                     // garbage all the time.
                     error!("Error parsing protocol message: {:?}", e);
+                    let label_values = &["unwrap_wire", "failure", "unknown"];
+                    GOSSIP_BYTES_RECEIVED
+                        .with_label_values(label_values)
+                        .set(msg.len().to_i64());
+                    GOSSIP_MESSAGES_RECEIVED
+                        .with_label_values(label_values)
+                        .inc();
                     continue;
                 }
             };
+
             let proto = match RumorEnvelope::decode(&payload) {
                 Ok(proto) => proto,
                 Err(e) => {
                     error!("Error parsing protocol message: {:?}", e);
+                    let label_values = &["undecodable", "failure", "unknown"];
+                    GOSSIP_BYTES_RECEIVED
+                        .with_label_values(label_values)
+                        .set(payload.len().to_i64());
+                    GOSSIP_MESSAGES_RECEIVED
+                        .with_label_values(label_values)
+                        .inc();
                     continue 'recv;
                 }
             };
+
+            let blocked = self.server.is_member_blocked(&proto.from_id);
+            let blocked_label = if blocked { "true" } else { "false" };
+            let label_values = &[&proto.type_.to_string(), "success", blocked_label];
+
             GOSSIP_MESSAGES_RECEIVED
-                .with_label_values(&[&proto.type_.to_string()])
+                .with_label_values(label_values)
                 .inc();
             GOSSIP_BYTES_RECEIVED
-                .with_label_values(&[&proto.type_.to_string()])
-                .set(payload.len() as f64);
-            if self.server.is_member_blocked(&proto.from_id) {
+                .with_label_values(label_values)
+                .set(payload.len().to_i64());
+
+            if blocked {
                 warn!(
                     "Not processing message from {} - it is blocked",
                     proto.from_id
                 );
                 continue 'recv;
             }
+
             trace_it!(GOSSIP: &self.server, TraceKind::RecvRumor, &proto.from_id, &proto);
             match proto.kind {
                 RumorKind::Membership(membership) => {

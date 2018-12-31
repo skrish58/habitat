@@ -42,7 +42,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use habitat_core::crypto::SymKey;
-use prometheus::{Gauge, HistogramTimer, HistogramVec};
+use prometheus::{HistogramTimer, HistogramVec, IntGauge};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 
@@ -66,7 +66,7 @@ use trace::{Trace, TraceKind};
 const SELF_DEPARTURE_RUMOR_FANOUT: usize = 10;
 
 lazy_static! {
-    static ref INCARNATION: Gauge = register_gauge!(opts!(
+    static ref INCARNATION: IntGauge = register_int_gauge!(opts!(
         "hab_butterfly_incarnation_number",
         "Incarnation number of the supervisor"
     ))
@@ -137,7 +137,7 @@ impl Myself {
             Some(ref mut s) => {
                 let value = s.load()?;
                 self.member.incarnation = value;
-                INCARNATION.set(value.to_u64() as f64);
+                INCARNATION.set(value.to_i64());
             }
             None => {
                 // Can't sync unless you've got a store!
@@ -197,7 +197,7 @@ impl Myself {
     /// that.
     fn refute_incarnation(&mut self, incoming: Incarnation) {
         self.member.incarnation = incoming + 1;
-        INCARNATION.set(self.member.incarnation.to_u64() as f64);
+        INCARNATION.set(self.member.incarnation.to_i64());
         if let Some(ref mut s) = self.incarnation_store {
             if let Err(e) = s.store(self.member.incarnation) {
                 error!(
@@ -1091,6 +1091,11 @@ impl Server {
                                 .election_timers
                                 .write()
                                 .expect("Election timers lock poisoned");
+
+                            // Just to be extra clear, we don't need this timer any more because
+                            // once we call observe_duration(), the HistogramVec contained in
+                            // ELECTION_DURATION has the data we want, stored in the global
+                            // registry.
                             if let Some(timer) = existing_timers.remove(&election.service_group) {
                                 timer.0.observe_duration();
                             }

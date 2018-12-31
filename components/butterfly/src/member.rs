@@ -26,7 +26,8 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use prometheus::GaugeVec;
+use habitat_core::util::ToI64;
+use prometheus::IntGaugeVec;
 use rand::{seq::SliceRandom, thread_rng};
 use serde::{
     de,
@@ -45,7 +46,7 @@ use rumor::{RumorKey, RumorPayload, RumorType};
 const PINGREQ_TARGETS: usize = 5;
 
 lazy_static! {
-    static ref PEER_HEALTH_COUNT: GaugeVec = register_gauge_vec!(
+    static ref PEER_HEALTH_COUNT: IntGaugeVec = register_int_gauge_vec!(
         "hab_butterfly_peer_health_total",
         "Number of butterfly peers",
         &["health"]
@@ -76,6 +77,10 @@ impl From<u64> for Incarnation {
 impl Incarnation {
     pub fn to_u64(&self) -> u64 {
         self.0
+    }
+
+    pub fn to_i64(&self) -> i64 {
+        self.0.to_i64()
     }
 }
 
@@ -625,31 +630,24 @@ impl MemberList {
 
     fn calculate_peer_health_metrics(&self) {
         let health_map = self.health.read().expect("Health lock is poisoned");
-        let health_count = health_map.values().filter(|h| **h == Health::Alive).count();
-        PEER_HEALTH_COUNT
-            .with_label_values(&["alive"])
-            .set(health_count as f64);
-        let health_count = health_map
-            .values()
-            .filter(|h| **h == Health::Suspect)
-            .count();
-        PEER_HEALTH_COUNT
-            .with_label_values(&["suspect"])
-            .set(health_count as f64);
-        let health_count = health_map
-            .values()
-            .filter(|h| **h == Health::Confirmed)
-            .count();
-        PEER_HEALTH_COUNT
-            .with_label_values(&["confirmed"])
-            .set(health_count as f64);
-        let health_count = health_map
-            .values()
-            .filter(|h| **h == Health::Departed)
-            .count();
-        PEER_HEALTH_COUNT
-            .with_label_values(&["departed"])
-            .set(health_count as f64);
+        let mut health_counts: HashMap<Health, i64> = HashMap::new();
+
+        for &health in health_map.values() {
+            *health_counts.entry(health).or_insert(0) += 1;
+        }
+
+        for health in [
+            Health::Alive,
+            Health::Suspect,
+            Health::Confirmed,
+            Health::Departed,
+        ]
+        .iter()
+        {
+            PEER_HEALTH_COUNT
+                .with_label_values(&[&health.to_string()])
+                .set(*health_counts.get(health).unwrap_or(&0));
+        }
     }
 
     // TODO (CM): accept AsRef<MemberId> here (and implement that on

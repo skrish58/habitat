@@ -37,7 +37,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use bytes::BytesMut;
-use prometheus::CounterVec;
+use prometheus::IntCounterVec;
 use prost::Message as ProstMessage;
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Serialize, Serializer};
@@ -53,7 +53,7 @@ pub use protocol::newscast::{Rumor as ProtoRumor, RumorPayload, RumorType};
 use protocol::{FromProto, Message};
 
 lazy_static! {
-    static ref IGNORED_RUMOR_COUNT: CounterVec = register_counter_vec!(
+    static ref IGNORED_RUMOR_COUNT: IntCounterVec = register_int_counter_vec!(
         "hab_butterfly_ignored_rumor_total",
         "How many rumors we ignore",
         &["rumor"]
@@ -382,11 +382,13 @@ where
         let rumors = list
             .entry(String::from(rumor.key()))
             .or_insert(HashMap::new());
+        let kind_ignored_count =
+            IGNORED_RUMOR_COUNT.with_label_values(&[&rumor.kind().to_string()]);
         // Result reveals if there was a change so we can increment the counter if needed.
         let result = match rumors.entry(rumor.id().into()) {
-            Entry::Occupied(mut entry) => entry.get_mut().merge(rumor.clone()),
+            Entry::Occupied(mut entry) => entry.get_mut().merge(rumor),
             Entry::Vacant(entry) => {
-                entry.insert(rumor.clone());
+                entry.insert(rumor);
                 true
             }
         };
@@ -395,9 +397,7 @@ where
         } else {
             // If we get here, it means nothing changed, which means we effectively ignored the
             // rumor. Let's track that.
-            IGNORED_RUMOR_COUNT
-                .with_label_values(&[&rumor.kind().to_string()])
-                .inc();
+            kind_ignored_count.inc();
         }
         result
     }

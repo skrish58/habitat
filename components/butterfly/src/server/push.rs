@@ -20,7 +20,8 @@
 use std::thread;
 use std::time::Duration;
 
-use prometheus::{CounterVec, GaugeVec};
+use habitat_core::util::ToI64;
+use prometheus::{IntCounterVec, IntGaugeVec};
 use time::SteadyTime;
 use zmq;
 
@@ -34,16 +35,16 @@ use ZMQ_CONTEXT;
 const FANOUT: usize = 5;
 
 lazy_static! {
-    static ref GOSSIP_MESSAGES_SENT: CounterVec = register_counter_vec!(
+    static ref GOSSIP_MESSAGES_SENT: IntCounterVec = register_int_counter_vec!(
         "hab_butterfly_gossip_messages_sent_total",
         "Total number of gossip messages sent",
-        &["type"]
+        &["type", "mode"]
     )
     .unwrap();
-    static ref GOSSIP_BYTES_SENT: GaugeVec = register_gauge_vec!(
+    static ref GOSSIP_BYTES_SENT: IntGaugeVec = register_int_gauge_vec!(
         "hab_butterfly_gossip_sent_bytes",
         "Gossip message size sent in bytes",
-        &["type"]
+        &["type", "mode"]
     )
     .unwrap();
 }
@@ -185,6 +186,9 @@ impl PushWorker {
             Ok(()) => debug!("Connected push socket to {:?}", member),
             Err(e) => {
                 error!("Cannot connect push socket to {:?}: {:?}", member, e);
+                let label_values = &["socket_connect", "failure"];
+                GOSSIP_MESSAGES_SENT.with_label_values(label_values).inc();
+                GOSSIP_BYTES_SENT.with_label_values(label_values).set(0);
                 return;
             }
         }
@@ -207,6 +211,9 @@ impl PushWorker {
                                  sending rumor: {:?}",
                                 e
                             );
+                            let label_values = &["member_rumor_encode", "failure"];
+                            GOSSIP_MESSAGES_SENT.with_label_values(label_values).inc();
+                            GOSSIP_BYTES_SENT.with_label_values(label_values).set(0);
                             continue 'rumorlist;
                         }
                     }
@@ -228,6 +235,9 @@ impl PushWorker {
                                  sending rumor: {:?}",
                                 e
                             );
+                            let label_values = &["service_rumor_encode", "failure"];
+                            GOSSIP_MESSAGES_SENT.with_label_values(label_values).inc();
+                            GOSSIP_BYTES_SENT.with_label_values(label_values).set(0);
                             continue 'rumorlist;
                         }
                     }
@@ -249,6 +259,9 @@ impl PushWorker {
                                  sending rumor: {:?}",
                                 e
                             );
+                            let label_values = &["service_config_rumor_encode", "failure"];
+                            GOSSIP_MESSAGES_SENT.with_label_values(label_values).inc();
+                            GOSSIP_BYTES_SENT.with_label_values(label_values).set(0);
                             continue 'rumorlist;
                         }
                     }
@@ -270,6 +283,9 @@ impl PushWorker {
                                  sending rumor: {:?}",
                                 e
                             );
+                            let label_values = &["service_file_rumor_encode", "failure"];
+                            GOSSIP_MESSAGES_SENT.with_label_values(label_values).inc();
+                            GOSSIP_BYTES_SENT.with_label_values(label_values).set(0);
                             continue 'rumorlist;
                         }
                     }
@@ -286,6 +302,9 @@ impl PushWorker {
                              sending rumor: {:?}",
                             e
                         );
+                        let label_values = &["departure_rumor_encode", "failure"];
+                        GOSSIP_MESSAGES_SENT.with_label_values(label_values).inc();
+                        GOSSIP_BYTES_SENT.with_label_values(label_values).set(0);
                         continue 'rumorlist;
                     }
                 },
@@ -306,6 +325,9 @@ impl PushWorker {
                                  sending rumor: {:?}",
                                 e
                             );
+                            let label_values = &["election_rumor_encode", "failure"];
+                            GOSSIP_MESSAGES_SENT.with_label_values(label_values).inc();
+                            GOSSIP_BYTES_SENT.with_label_values(label_values).set(0);
                             continue 'rumorlist;
                         }
                     }
@@ -322,6 +344,9 @@ impl PushWorker {
                              rumor: {:?}",
                             e
                         );
+                        let label_values = &["election_update_rumor_encode", "failure"];
+                        GOSSIP_MESSAGES_SENT.with_label_values(label_values).inc();
+                        GOSSIP_BYTES_SENT.with_label_values(label_values).set(0);
                         continue 'rumorlist;
                     }
                 },
@@ -330,21 +355,27 @@ impl PushWorker {
                     continue 'rumorlist;
                 }
             };
+            let rumor_len = rumor_as_bytes.len().to_i64();
             let payload = match self.server.generate_wire(rumor_as_bytes) {
                 Ok(payload) => payload,
                 Err(e) => {
                     error!("Generating protobuf failed: {}", e);
+                    let label_values = &["generate_wire", "failure"];
+                    GOSSIP_MESSAGES_SENT.with_label_values(label_values).inc();
+                    GOSSIP_BYTES_SENT
+                        .with_label_values(label_values)
+                        .set(rumor_len);
                     continue 'rumorlist;
                 }
             };
             match socket.send(&payload, 0) {
                 Ok(()) => {
                     GOSSIP_MESSAGES_SENT
-                        .with_label_values(&[&rumor_key.kind.to_string()])
+                        .with_label_values(&[&rumor_key.kind.to_string(), "success"])
                         .inc();
                     GOSSIP_BYTES_SENT
-                        .with_label_values(&[&rumor_key.kind.to_string()])
-                        .set(payload.len() as f64);
+                        .with_label_values(&[&rumor_key.kind.to_string(), "success"])
+                        .set(payload.len().to_i64());
                     debug!("Sent rumor {:?} to {:?}", rumor_key, member);
                 }
                 Err(e) => warn!(

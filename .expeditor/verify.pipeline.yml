@@ -162,7 +162,7 @@ steps:
   #   agents:
   #     queue: 'windows-docker'
 
-   - label: "[unit] :windows: butterfly"
+  - label: "[unit] :windows: butterfly"
     command:
       - ./test/run_cargo_test.ps1 butterfly
     agents:
@@ -210,7 +210,7 @@ steps:
   #   agents:
   #     queue: 'windows-docker'
 
-   - label: "[unit] :windows: pkg-export-docker"
+  - label: "[unit] :windows: pkg-export-docker"
     command:
       - ./test/run_cargo_test.ps1 pkg-export-docker
     agents:
@@ -222,7 +222,7 @@ steps:
   #   agents:
   #     queue: 'windows-docker'
 
-   - label: "[unit] :windows: pkg-export-kubernetes"
+  - label: "[unit] :windows: pkg-export-kubernetes"
     command:
       - ./test/run_cargo_test.ps1 pkg-export-kubernetes
     agents:
@@ -234,7 +234,7 @@ steps:
   #   agents:
   #     queue: 'windows-docker'
 
-   - label: "[unit] :windows: sup"
+  - label: "[unit] :windows: sup"
     command:
       - ./test/run_cargo_test.ps1 sup
     agents:

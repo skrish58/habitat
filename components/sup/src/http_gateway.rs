@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::{
+    cell::Cell,
     fmt,
     fs::File,
     io::{self, Read},
@@ -27,7 +28,7 @@ use std::{
 use actix;
 use actix_web::{
     http::{self, StatusCode},
-    middleware::{Middleware, Started},
+    middleware::{Finished, Middleware, Started},
     pred::Predicate,
     server, App, FromRequest, HttpRequest, HttpResponse, Path, Request,
 };
@@ -36,7 +37,7 @@ use common::defaults::{
 };
 use config::EnvConfig;
 use hcore::{crypto, env as henv, service::ServiceGroup};
-use prometheus::{self, CounterVec, Encoder, HistogramVec, TextEncoder};
+use prometheus::{self, CounterVec, Encoder, HistogramTimer, HistogramVec, TextEncoder};
 use rustls::ServerConfig;
 use serde_json::{self, Value as Json};
 
@@ -58,13 +59,13 @@ lazy_static! {
     static ref HTTP_GATEWAY_REQUESTS: CounterVec = register_counter_vec!(
         "hab_sup_http_gateway_requests_total",
         "Total number of HTTP gateway requests",
-        &["handler"]
+        &["path"]
     )
     .unwrap();
     static ref HTTP_GATEWAY_REQUEST_DURATION: HistogramVec = register_histogram_vec!(
         "hab_sup_http_gateway_request_duration_seconds",
         "The latency for HTTP gateway requests",
-        &["handler"]
+        &["path"]
     )
     .unwrap();
 }
@@ -148,15 +149,19 @@ impl Into<StatusCode> for HealthCheck {
 
 struct AppState {
     gateway_state: Arc<RwLock<manager::GatewayState>>,
+    timer: Cell<Option<HistogramTimer>>,
 }
 
 impl AppState {
     fn new(gs: Arc<RwLock<manager::GatewayState>>) -> Self {
-        AppState { gateway_state: gs }
+        AppState {
+            gateway_state: gs,
+            timer: Cell::new(None),
+        }
     }
 }
 
-// Our authentication middleware
+// Begin middleware
 struct Authentication;
 
 impl Middleware<AppState> for Authentication {
@@ -206,6 +211,34 @@ impl Middleware<AppState> for Authentication {
     }
 }
 
+struct Metrics;
+
+impl Middleware<AppState> for Metrics {
+    fn start(&self, req: &HttpRequest<AppState>) -> actix_web::Result<Started> {
+        let label_values = &[req.path()];
+
+        HTTP_GATEWAY_REQUESTS.with_label_values(label_values).inc();
+        let timer = HTTP_GATEWAY_REQUEST_DURATION
+            .with_label_values(label_values)
+            .start_timer();
+        req.state().timer.set(Some(timer));
+
+        Ok(Started::Done)
+    }
+
+    fn finish(&self, req: &HttpRequest<AppState>, _resp: &HttpResponse) -> Finished {
+        let timer = req.state().timer.replace(None);
+
+        if timer.is_some() {
+            timer.unwrap().observe_duration();
+        }
+
+        Finished::Done
+    }
+}
+
+// End middleware
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ServerStartup {
     NotStarted,
@@ -237,6 +270,7 @@ impl Server {
                 let app_state = AppState::new(gateway_state.clone());
                 App::with_state(app_state)
                     .middleware(Authentication)
+                    .middleware(Metrics)
                     .configure(routes)
             })
             .workers(thread_count);
@@ -318,49 +352,32 @@ fn json_response(data: String) -> HttpResponse {
 
 // Begin route handlers
 fn butterfly(req: &HttpRequest<AppState>) -> HttpResponse {
-    HTTP_GATEWAY_REQUESTS
-        .with_label_values(&["butterfly"])
-        .inc();
-    let timer = HTTP_GATEWAY_REQUEST_DURATION
-        .with_label_values(&["butterfly"])
-        .start_timer();
     let data = &req
         .state()
         .gateway_state
         .read()
         .expect("GatewayState lock is poisoned")
         .butterfly_data;
-    timer.observe_duration();
     json_response(data.to_string())
 }
 
 fn census(req: &HttpRequest<AppState>) -> HttpResponse {
-    HTTP_GATEWAY_REQUESTS.with_label_values(&["census"]).inc();
-    let timer = HTTP_GATEWAY_REQUEST_DURATION
-        .with_label_values(&["census"])
-        .start_timer();
     let data = &req
         .state()
         .gateway_state
         .read()
         .expect("GatewayState lock is poisoned")
         .census_data;
-    timer.observe_duration();
     json_response(data.to_string())
 }
 
 fn services(req: &HttpRequest<AppState>) -> HttpResponse {
-    HTTP_GATEWAY_REQUESTS.with_label_values(&["services"]).inc();
-    let timer = HTTP_GATEWAY_REQUEST_DURATION
-        .with_label_values(&["services"])
-        .start_timer();
     let data = &req
         .state()
         .gateway_state
         .read()
         .expect("GatewayState lock is poisoned")
         .services_data;
-    timer.observe_duration();
     json_response(data.to_string())
 }
 
@@ -386,10 +403,6 @@ fn config(
     group: String,
     org: Option<&str>,
 ) -> HttpResponse {
-    HTTP_GATEWAY_REQUESTS.with_label_values(&["config"]).inc();
-    let timer = HTTP_GATEWAY_REQUEST_DURATION
-        .with_label_values(&["config"])
-        .start_timer();
     let data = &req
         .state()
         .gateway_state
@@ -400,9 +413,8 @@ fn config(
         Ok(sg) => sg,
         Err(_) => return HttpResponse::BadRequest().finish(),
     };
-    let service = service_from_services(&service_group, &data);
-    timer.observe_duration();
-    match service {
+
+    match service_from_services(&service_group, &data) {
         Some(mut s) => HttpResponse::Ok().json(s["cfg"].take()),
         None => HttpResponse::NotFound().finish(),
     }
@@ -428,10 +440,6 @@ fn health(
     group: String,
     org: Option<&str>,
 ) -> HttpResponse {
-    HTTP_GATEWAY_REQUESTS.with_label_values(&["health"]).inc();
-    let timer = HTTP_GATEWAY_REQUEST_DURATION
-        .with_label_values(&["health"])
-        .start_timer();
     let service_group = match ServiceGroup::new(None, svc, group, org) {
         Ok(sg) => sg,
         Err(_) => return HttpResponse::BadRequest().finish(),
@@ -458,14 +466,12 @@ fn health(
             let _ = file.read_to_string(&mut body.stderr);
         }
 
-        timer.observe_duration();
         HttpResponse::build(http_status).json(&body)
     } else {
         debug!(
             "Didn't find any health data for service group {:?}",
             &service_group
         );
-        timer.observe_duration();
         HttpResponse::NotFound().finish()
     }
 }
@@ -490,10 +496,6 @@ fn service(
     group: String,
     org: Option<&str>,
 ) -> HttpResponse {
-    HTTP_GATEWAY_REQUESTS.with_label_values(&["service"]).inc();
-    let timer = HTTP_GATEWAY_REQUEST_DURATION
-        .with_label_values(&["service"])
-        .start_timer();
     let data = &req
         .state()
         .gateway_state
@@ -504,20 +506,14 @@ fn service(
         Ok(sg) => sg,
         Err(_) => return HttpResponse::BadRequest().finish(),
     };
-    let service = service_from_services(&service_group, &data);
-    timer.observe_duration();
-    match service {
+
+    match service_from_services(&service_group, &data) {
         Some(s) => HttpResponse::Ok().json(s),
         None => HttpResponse::NotFound().finish(),
     }
 }
 
 fn metrics(_req: &HttpRequest<AppState>) -> HttpResponse {
-    HTTP_GATEWAY_REQUESTS.with_label_values(&["metrics"]).inc();
-    let timer = HTTP_GATEWAY_REQUEST_DURATION
-        .with_label_values(&["metrics"])
-        .start_timer();
-
     let encoder = TextEncoder::new();
     let metric_families = prometheus::gather();
     let mut buffer = vec![];
@@ -534,18 +530,12 @@ fn metrics(_req: &HttpRequest<AppState>) -> HttpResponse {
         }
     };
 
-    timer.observe_duration();
     HttpResponse::Ok()
         .content_type(encoder.format_type())
         .body(resp)
 }
 
 fn doc(_req: &HttpRequest<AppState>) -> HttpResponse {
-    HTTP_GATEWAY_REQUESTS.with_label_values(&["doc"]).inc();
-    let timer = HTTP_GATEWAY_REQUEST_DURATION
-        .with_label_values(&["doc"])
-        .start_timer();
-    timer.observe_duration();
     HttpResponse::Ok().content_type("text/html").body(APIDOCS)
 }
 // End route handlers

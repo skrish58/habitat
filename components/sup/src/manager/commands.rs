@@ -42,7 +42,7 @@ use manager::{
     },
     ManagerConfig, ManagerState,
 };
-use prometheus::{CounterVec, HistogramVec};
+use prometheus::{HistogramVec, IntCounterVec};
 use protocol::{
     self,
     net::{self, ErrCode, NetResult},
@@ -52,7 +52,7 @@ use util;
 static LOGKEY: &'static str = "CMD";
 
 lazy_static! {
-    static ref RPC_CALLS: CounterVec = register_counter_vec!(
+    static ref RPC_CALLS: IntCounterVec = register_int_counter_vec!(
         "hab_sup_rpc_call_total",
         "Total number of RPC calls",
         &["name"]
@@ -241,9 +241,9 @@ pub fn service_load(
     req: &mut CtlRequest,
     opts: protocol::ctl::SvcLoad,
 ) -> NetResult<()> {
-    RPC_CALLS.with_label_values(&["svc_load"]).inc();
+    RPC_CALLS.with_label_values(&["service_load"]).inc();
     let timer = RPC_CALL_DURATION
-        .with_label_values(&["svc_load"])
+        .with_label_values(&["service_load"])
         .start_timer();
     let ident: PackageIdent = opts.ident.clone().ok_or(err_update_client())?.into();
     let bldr_url = opts
@@ -438,9 +438,9 @@ pub fn service_unload(
     req: &mut CtlRequest,
     opts: protocol::ctl::SvcUnload,
 ) -> NetResult<()> {
-    RPC_CALLS.with_label_values(&["svc_unload"]).inc();
+    RPC_CALLS.with_label_values(&["service_unload"]).inc();
     let timer = RPC_CALL_DURATION
-        .with_label_values(&["svc_unload"])
+        .with_label_values(&["service_unload"])
         .start_timer();
     let ident: PackageIdent = opts.ident.ok_or(err_update_client())?.into();
     // Gather up the paths to all the spec files we care about,
@@ -484,9 +484,9 @@ pub fn service_start(
     req: &mut CtlRequest,
     opts: protocol::ctl::SvcStart,
 ) -> NetResult<()> {
-    RPC_CALLS.with_label_values(&["svc_start"]).inc();
+    RPC_CALLS.with_label_values(&["service_start"]).inc();
     let timer = RPC_CALL_DURATION
-        .with_label_values(&["svc_start"])
+        .with_label_values(&["service_start"])
         .start_timer();
     let ident = opts.ident.ok_or(err_update_client())?.into();
     let updated_specs = match existing_specs_for_ident(&mgr.cfg, &ident)? {
@@ -537,9 +537,9 @@ pub fn service_stop(
     req: &mut CtlRequest,
     opts: protocol::ctl::SvcStop,
 ) -> NetResult<()> {
-    RPC_CALLS.with_label_values(&["svc_stop"]).inc();
+    RPC_CALLS.with_label_values(&["service_stop"]).inc();
     let timer = RPC_CALL_DURATION
-        .with_label_values(&["svc_stop"])
+        .with_label_values(&["service_stop"])
         .start_timer();
     let ident: PackageIdent = opts.ident.ok_or(err_update_client())?.into();
     let updated_specs = match existing_specs_for_ident(&mgr.cfg, &ident)? {
@@ -616,9 +616,9 @@ pub fn service_status(
     req: &mut CtlRequest,
     opts: protocol::ctl::SvcStatus,
 ) -> NetResult<()> {
-    RPC_CALLS.with_label_values(&["svc_status"]).inc();
+    RPC_CALLS.with_label_values(&["service_status"]).inc();
     let timer = RPC_CALL_DURATION
-        .with_label_values(&["svc_status"])
+        .with_label_values(&["service_status"])
         .start_timer();
     let services_data = &mgr
         .gateway_state

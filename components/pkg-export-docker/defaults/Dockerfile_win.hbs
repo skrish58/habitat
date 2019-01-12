@@ -1,4 +1,8 @@
 FROM microsoft/windowsservercore
+{{install_hook_env}}
+ENV OFFLINE_INSTALL ON
 ADD {{rootfs}} /
+
 EXPOSE 9631 {{exposes}}
+RUN {{hab_path}} pkg install {{installed_primary_svc_ident}}
 ENTRYPOINT ["{{hab_path}}", "sup", "run", "{{primary_svc_ident}}"]

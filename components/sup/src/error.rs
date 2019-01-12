@@ -58,7 +58,6 @@ use crate::hcore::package::{self, Identifiable, PackageInstall};
 use crate::launcher_client;
 use crate::protocol;
 use glob;
-use handlebars;
 use notify;
 use rustls;
 use serde_json;
@@ -115,7 +114,6 @@ pub enum Error {
     BadPackage(PackageInstall, hcore::error::Error),
     BadSpecsPath(PathBuf, io::Error),
     BadStartStyle(String),
-    BadEnvConfig(String),
     BindTimeout(String),
     LockPoisoned,
     TestBootFail,
@@ -129,8 +127,6 @@ pub enum Error {
     GroupNotFound(String),
     HabitatCommon(common::Error),
     HabitatCore(hcore::Error),
-    TemplateFileError(handlebars::TemplateFileError),
-    TemplateRenderError(handlebars::RenderError),
     InvalidBinding(String),
     InvalidBinds(Vec<String>),
     InvalidCertFile(PathBuf),
@@ -162,7 +158,6 @@ pub enum Error {
     ProcessLocked(Pid),
     ProcessLockIO(PathBuf, io::Error),
     RecvError(mpsc::RecvError),
-    RenderContextSerialization(serde_json::Error),
     ServiceDeserializationError(serde_json::Error),
     ServiceNotLoaded(package::PackageIdent),
     ServiceSerializationError(serde_json::Error),
@@ -177,8 +172,6 @@ pub enum Error {
     StringFromUtf8Error(string::FromUtf8Error),
     TLSError(rustls::TLSError),
     TomlEncode(toml::ser::Error),
-    TomlMergeError(String),
-    TomlParser(toml::de::Error),
     TryRecvError(mpsc::TryRecvError),
     UnpackFailed,
     UserNotFound(String),
@@ -227,9 +220,6 @@ impl fmt::Display for SupError {
                 err
             ),
             Error::BadStartStyle(ref style) => format!("Unknown service start style '{}'", style),
-            Error::BadEnvConfig(ref varname) => {
-                format!("Unable to find valid TOML or JSON in {} ENVVAR", varname)
-            }
             Error::BindTimeout(ref err) => format!("Timeout waiting to bind to {}", err),
             Error::LockPoisoned => format!("A mutex or read/write lock has failed."),
             Error::TestBootFail => format!("Simulated boot failure"),
@@ -245,8 +235,6 @@ impl fmt::Display for SupError {
             Error::Permissions(ref err) => format!("{}", err),
             Error::HabitatCommon(ref err) => format!("{}", err),
             Error::HabitatCore(ref err) => format!("{}", err),
-            Error::TemplateFileError(ref err) => format!("{:?}", err),
-            Error::TemplateRenderError(ref err) => format!("{}", err),
             Error::EnvJoinPathsError(ref err) => format!("{}", err),
             Error::FileNotFound(ref e) => format!("File not found at: {}", e),
             Error::FileWatcherFileIsRoot => format!("Watched file is root"),
@@ -314,9 +302,6 @@ impl fmt::Display for SupError {
                 err
             ),
             Error::RecvError(ref err) => format!("{}", err),
-            Error::RenderContextSerialization(ref e) => {
-                format!("Unable to serialize rendering context, {}", e)
-            }
             Error::ServiceDeserializationError(ref e) => {
                 format!("Can't deserialize service status: {}", e)
             }
@@ -346,8 +331,6 @@ impl fmt::Display for SupError {
             Error::StringFromUtf8Error(ref e) => format!("{}", e),
             Error::TLSError(ref e) => format!("{}", e),
             Error::TomlEncode(ref e) => format!("Failed to encode TOML: {}", e),
-            Error::TomlMergeError(ref e) => format!("Failed to merge TOML: {}", e),
-            Error::TomlParser(ref err) => format!("Failed to parse TOML: {}", err),
             Error::TryRecvError(ref err) => format!("{}", err),
             Error::UnpackFailed => format!("Failed to unpack a package"),
             Error::UserNotFound(ref e) => format!("No UID for user '{}' could be found", e),
@@ -380,7 +363,6 @@ impl error::Error for SupError {
             Error::BadPackage(_, _) => "Package was malformed or contained malformed contents",
             Error::BadSpecsPath(_, _) => "Unable to create the specs directory",
             Error::BadStartStyle(_) => "Unknown start style in service spec",
-            Error::BadEnvConfig(_) => "Unknown syntax in Env Configuration",
             Error::BindTimeout(_) => "Timeout waiting to bind to an address",
             Error::LockPoisoned => "A mutex or read/write lock has failed",
             Error::TestBootFail => "Simulated boot failure",
@@ -388,8 +370,6 @@ impl error::Error for SupError {
             Error::CtlSecretIo(_, _) => "IoError while reading ctl secret",
             Error::ExecCommandNotFound(_) => "Exec command was not found on filesystem or in PATH",
             Error::GroupNotFound(_) => "No matching GID for group found",
-            Error::TemplateFileError(ref err) => err.description(),
-            Error::TemplateRenderError(ref err) => err.description(),
             Error::HabitatCommon(ref err) => err.description(),
             Error::HabitatCore(ref err) => err.description(),
             Error::EnvJoinPathsError(ref err) => err.description(),
@@ -436,7 +416,6 @@ impl error::Error for SupError {
             }
             Error::ProcessLockIO(_, _) => "Unable to read or write to a process lock",
             Error::RecvError(_) => "A channel failed to receive a response",
-            Error::RenderContextSerialization(_) => "Unable to serialize rendering context",
             Error::ServiceDeserializationError(_) => "Can't deserialize service status",
             Error::ServiceNotLoaded(_) => "Service status called when service not loaded",
             Error::ServiceSerializationError(_) => "Can't serialize service to file",
@@ -451,8 +430,6 @@ impl error::Error for SupError {
             Error::StringFromUtf8Error(_) => "Failed to convert a string from a Vec<u8> as UTF-8",
             Error::TLSError(_) => "TLS Error!",
             Error::TomlEncode(_) => "Failed to encode toml!",
-            Error::TomlMergeError(_) => "Failed to merge TOML!",
-            Error::TomlParser(_) => "Failed to parse TOML!",
             Error::TryRecvError(_) => "A channel failed to receive a response",
             Error::UnpackFailed => "Failed to unpack a package",
             Error::UserNotFound(_) => "No matching UID for user found",
@@ -499,18 +476,6 @@ impl From<common::Error> for SupError {
 impl From<glob::PatternError> for SupError {
     fn from(err: glob::PatternError) -> SupError {
         sup_error!(Error::SpecWatcherGlob(err))
-    }
-}
-
-impl From<handlebars::RenderError> for SupError {
-    fn from(err: handlebars::RenderError) -> SupError {
-        sup_error!(Error::TemplateRenderError(err))
-    }
-}
-
-impl From<handlebars::TemplateFileError> for SupError {
-    fn from(err: handlebars::TemplateFileError) -> SupError {
-        sup_error!(Error::TemplateFileError(err))
     }
 }
 
@@ -571,12 +536,6 @@ impl From<mpsc::TryRecvError> for SupError {
 impl From<notify::Error> for SupError {
     fn from(err: notify::Error) -> SupError {
         sup_error!(Error::NotifyError(err))
-    }
-}
-
-impl From<toml::de::Error> for SupError {
-    fn from(err: toml::de::Error) -> Self {
-        sup_error!(Error::TomlParser(err))
     }
 }
 

@@ -286,6 +286,29 @@ impl<'a, 'b> Cli<'a, 'b> {
 
         Cli { app: app }
     }
+
+    pub fn add_memory_arg(self) -> Self {
+        let app = self.app.arg(
+            Arg::with_name("MEMORY_LIMIT")
+                .value_name("MEMORY_LIMIT")
+                .long("memory")
+                .short("m")
+                .help("Memory limit allocated to build"),
+        );
+
+        Cli { app: app }
+    }
+
+    pub fn add_user_toml_arg(self) -> Self {
+        let app = self.app.arg(
+            Arg::with_name("USER_TOML")
+                .value_name("USER_TOML")
+                .long("user-toml")
+                .help("Path to a user.toml file to override default configuration"),
+        );
+
+        Cli { app: app }
+    }
 }
 
 fn valid_ident_or_hart(val: String) -> result::Result<(), String> {

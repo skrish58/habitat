@@ -15,7 +15,9 @@
 use std::path::Path;
 
 use crate::common;
-use crate::common::command::package::install::{InstallMode, InstallSource, LocalPackageUsage};
+use crate::common::command::package::install::{
+    InstallHookMode, InstallMode, InstallSource, LocalPackageUsage,
+};
 use crate::common::ui::UIWriter;
 use crate::hcore::env as henv;
 use crate::hcore::fs::{self, FS_ROOT_PATH};
@@ -61,6 +63,8 @@ where
         &InstallMode::default(),
         // TODO (CM): pass through and enable ignore-local mode
         &LocalPackageUsage::default(),
+        // Install hooks are run when the supervisor loads the package
+        &InstallHookMode::Ignore,
     )
     .map_err(SupError::from)
 }

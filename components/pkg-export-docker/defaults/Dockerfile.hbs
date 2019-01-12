@@ -1,7 +1,10 @@
 FROM scratch
 ENV PATH {{path}}
+{{install_hook_env}}
+ENV OFFLINE_INSTALL ON
 ADD {{rootfs}} /
 
 EXPOSE 9631 {{exposes}}
+RUN {{hab_path}} pkg install {{installed_primary_svc_ident}}
 ENTRYPOINT ["/init.sh"]
 CMD ["run", "{{primary_svc_ident}}"]
